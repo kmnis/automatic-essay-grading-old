@@ -1,9 +1,14 @@
 import re
 from nltk.corpus import stopwords
-from collections import defaultdict
 import numpy as np
+import pickle
+import os
 from tqdm import tqdm
 import pandas as pd
+# from keras.preprocessing.text import Tokenizer
+from keras.preprocessing.text import text_to_word_sequence
+
+pj = os.path.join
 
 # A list of contractions from https://stackoverflow.com/q/19790188/9865225
 contractions = {
@@ -83,14 +88,14 @@ contractions = {
 }
 
 
-def clean_text(text, remove_stopwords=True):
+def clean_text(text, remove_stopwords=True, remove_contractions=True):
     """Remove unwanted characters, stopwords, and format the text to create fewer nulls word embeddings"""
 
     # Convert words to lower case
     text = text.lower()
 
     # Replace contractions with their longer forms
-    if True:
+    if remove_contractions:
         text = text.split()
         new_text = []
         for word in text:
@@ -118,115 +123,92 @@ def clean_text(text, remove_stopwords=True):
     return text
 
 
-def count_words(text):
-    """Count the number of occurrences of each word in a set of text"""
-    count_dict = defaultdict(int)
-    for sentence in text:
-        for word in sentence.split():
-            count_dict[word] += 1
-    return dict(count_dict)
-
-
-def convert_to_ints(text, word_count, unk_count, vocab_to_int, eos=False):
-    """Convert words in text to an integer.
-       If word is not in vocab_to_int, use UNK's integer.
-       Total the number of words and UNKs.
-       Add EOS token to the end of texts"""
-    ints = []
-    for sentence in text:
-        sentence_ints = []
-        for word in sentence.split():
-            word_count += 1
-            if word in vocab_to_int:
-                sentence_ints.append(vocab_to_int[word])
-            else:
-                sentence_ints.append(vocab_to_int["<UNK>"])
-                unk_count += 1
-        if eos:
-            sentence_ints.append(vocab_to_int["<EOS>"])
-        ints.append(sentence_ints)
-    return ints, word_count, unk_count
-
-
-def load_embeddings(glove_dir):
-    embeddings_index = {}
+def load_embeddings(glove_dir, words):
+    embeddings = {}
     with open(glove_dir, encoding='utf-8') as f:
-        for line in f:
+        for line in tqdm(f, total=400000):
             values = line.split(' ')
-            word = values[0]
-            embedding = np.asarray(values[1:], dtype='float32')
-            embeddings_index[word] = embedding
+            word = values[0].lower()
+            if len({word} & words):
+                embedding = np.asarray(values[1:], dtype='float32')
+                embeddings[word] = embedding
 
-    print('Word embeddings:', len(embeddings_index))
-    return embeddings_index
-
-
-def convert_vocab_to_int(word_counts, embeddings_index, threshold=20):
-    # Limit the vocab that we will use to words that appear ≥ threshold or are in GloVe
-
-    # dictionary to convert words to integers
-    vocab_to_int = {}
-
-    value = 0
-    for word, count in word_counts.items():
-        if count >= threshold or word in embeddings_index:
-            vocab_to_int[word] = value
-            value += 1
-
-    # Special tokens that will be added to our vocab
-    codes = ["<UNK>", "<PAD>", "<EOS>", "<GO>"]
-
-    # Add codes to vocab
-    for code in codes:
-        vocab_to_int[code] = len(vocab_to_int)
-
-    # Dictionary to convert integers to words
-    int_to_vocab = {}
-    for word, value in vocab_to_int.items():
-        int_to_vocab[value] = word
-
-    usage_ratio = round(len(vocab_to_int) / len(word_counts), 4) * 100
-
-    print("Total number of unique words:", len(word_counts))
-    print("Number of words we will use:", len(vocab_to_int))
-    print("Percent of words we will use: {}%".format(usage_ratio))
+    embeddings["<PAD>"] = 0
+    embeddings["<UNK>"] = 0
+    print('Total number of word embeddings:', len(embeddings))
+    return embeddings
 
 
-def unk_counter(sentence, vocab_to_int):
-    """Counts the number of time UNK appears in a sentence."""
-    unk_count = 0
-    for word in sentence:
-        if word == vocab_to_int["<UNK>"]:
-            unk_count += 1
-    return unk_count
+def create_score(df):
+    df.loc[:, 'score'] = 0
+
+    # For essay_set = 1
+    ind = df.index[df['essay_set'] == 1]
+    for i in ind:
+        df.loc[i, 'score'] = df['domain1_score'][i] / 12
+
+    # For essay_set = 2
+    ind = df.index[df['essay_set'] == 2]
+    for i in ind:
+        df.loc[i, 'score'] = ((df['domain1_score'][i] / 6) + (df['domain2_score'][i] / 4)) / 2
+
+    # For essay_set = 3
+    ind = df.index[df['essay_set'] == 3]
+    for i in ind:
+        df.loc[i, 'score'] = df['domain1_score'][i] / 3
+
+    # For essay_set = 4
+    ind = df.index[df['essay_set'] == 4]
+    for i in ind:
+        df.loc[i, 'score'] = df['domain1_score'][i] / 3
+
+    # For essay_set = 5
+    ind = df.index[df['essay_set'] == 5]
+    for i in ind:
+        df.loc[i, 'score'] = df['domain1_score'][i] / 4
+
+    # For essay_set = 6
+    ind = df.index[df['essay_set'] == 6]
+    for i in ind:
+        df.loc[i, 'score'] = df['domain1_score'][i] / 4
+
+    # For essay_set = 7
+    ind = df.index[df['essay_set'] == 7]
+    for i in ind:
+        df.loc[i, 'score'] = df['domain1_score'][i] / 30
+
+    # For essay_set = 8
+    ind = df.index[df['essay_set'] == 8]
+    for i in ind:
+        df.loc[i, 'score'] = df['domain1_score'][i] / 60
+
+    df = df[["essay", "score"]]
+    return df
 
 
-def clean_reviews(lengths_texts, int_texts, vocab_to_int):
-    # Sort the summaries and texts by the length of the texts, shortest to longest
-    # Limit the length of summaries and texts based on the min and max ranges.
-    # Remove reviews that include too many UNKs
+def process_essay_df(df, glove_dir, embedding_dir):
+    words = []
+    for i in tqdm(range(len(df)), total=len(df)):
+        cleaned_essay = clean_text(df.essay[i])
+        word_sequence = text_to_word_sequence(cleaned_essay)
+        words.extend(word_sequence)
 
-    # sorted_summaries = []
-    sorted_texts = []
-    max_text_length = 150
-    # max_summary_length = 13
-    min_length = 2
-    unk_text_limit = 10
-    # unk_summary_limit = 0
+    print("Total number of words:", len(words))
+    print("Total number of unique words:", len(set(words)))
+    # tokenizer = Tokenizer(num_words=5000, oov_token='<UNK>')
+    # tokenizer.fit_on_texts(words)
+    # words = list(tokenizer.word_index.keys())
+    embeddings = load_embeddings(glove_dir, set(words))
 
-    for _ in tqdm(range(min(lengths_texts.counts), max_text_length)):
-        for count in range(len(int_texts)):
-            if (unk_counter(int_texts[count], vocab_to_int) <= unk_text_limit and len(
-                    int_texts[count]) >= min_length and len(int_texts[count]) <= max_text_length):
-                sorted_texts.append(int_texts[count])
-
-    # Compare lengths to ensure they match
-    print(len(sorted_texts))
+    with open(embedding_dir, "wb") as f:
+        pickle.dump(embeddings, f)
 
 
-def create_lengths(text):
-    """Create a data frame of the sentence lengths from a text"""
-    lengths = []
-    for sentence in tqdm(text):
-        lengths.append(len(sentence))
-    return pd.DataFrame(lengths, columns=['counts'])
+if __name__ == '__main__':
+    data_dir = pj(os.path.abspath(__file__).strip("preprocessing.py"), "../data")
+    df = pd.read_csv(pj(data_dir, "raw/training_set_rel3.tsv"), sep='\t', encoding="ISO-8859-1")
+    process_essay_df(df, pj(data_dir, "glove/glove.6B.50d.txt"), pj(data_dir, "processed/embeddings.p"))
+
+    print("Getting score for each essay")
+    df = create_score(df)
+    df.to_csv(pj(data_dir, "processed/data.csv"), index=False)
